@@ -3,11 +3,20 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import re
+import requests
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-change-this-in-production'
+
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-please-change')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+app.config['RECAPTCHA_SITE_KEY'] = os.getenv('RECAPTCHA_SITE_KEY')
+app.config['RECAPTCHA_SECRET_KEY'] = os.getenv('RECAPTCHA_SECRET_KEY')
 
 db = SQLAlchemy(app)
 
@@ -59,27 +68,45 @@ def register():
         email = request.form.get('email')
         password = request.form.get('password')
         confirm_password = request.form.get('confirm_password')
+        recaptcha_response = request.form.get('g-recaptcha-response')
+
+        if not recaptcha_response:
+            flash('Будь ласка, підтвердіть, що ви не робот', 'danger')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
+        verify_url = 'https://www.google.com/recaptcha/api/siteverify'
+        verify_data = {
+            'secret': app.config['RECAPTCHA_SECRET_KEY'],
+            'response': recaptcha_response,
+            'remoteip': request.remote_addr
+        }
+        
+        verify_response = requests.post(verify_url, data=verify_data)
+        result = verify_response.json()
+        
+        if not result.get('success'):
+            flash('Перевірка reCAPTCHA не пройдена. Спробуйте ще раз', 'danger')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
         if not username or not email or not password:
             flash('Будь ласка, заповніть всі поля', 'danger')
-            return render_template('register.html')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
         if password != confirm_password:
             flash('Паролі не співпадають', 'danger')
-            return render_template('register.html')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
         is_valid, message = validate_password(password)
         if not is_valid:
             flash(message, 'danger')
-            return render_template('register.html')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
         if User.query.filter_by(username=username).first():
             flash('Користувач з таким ім\'ям вже існує', 'danger')
-            return render_template('register.html')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
         
         if User.query.filter_by(email=email).first():
             flash('Користувач з такою email адресою вже існує', 'danger')
-            return render_template('register.html')
+            return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
         password_hash = generate_password_hash(password, method='pbkdf2:sha256')
 
@@ -90,7 +117,7 @@ def register():
         flash('Реєстрація успішна! Тепер ви можете увійти', 'success')
         return redirect(url_for('login'))
     
-    return render_template('register.html')
+    return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
