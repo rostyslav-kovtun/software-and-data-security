@@ -1,7 +1,9 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_sqlalchemy import SQLAlchemy
+from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from itsdangerous import URLSafeTimedSerializer
+from datetime import datetime, timezone
 import re
 import requests
 import os
@@ -18,25 +20,32 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['RECAPTCHA_SITE_KEY'] = os.getenv('RECAPTCHA_SITE_KEY')
 app.config['RECAPTCHA_SECRET_KEY'] = os.getenv('RECAPTCHA_SECRET_KEY')
 
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True') == 'True'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
+
 db = SQLAlchemy(app)
+mail = Mail(app)
+
+serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def __repr__(self):
         return f'<User {self.username}>'
 
 def validate_password(password):
     """
-    Перевіряє пароль на відповідність політиці безпеки:
-    - Мінімум 8 символів
-    - Містить великі та малі літери
-    - Містить цифру
-    - Містить спеціальний символ
+    Перевіряє пароль на відповідність політиці безпеки
     """
     if len(password) < 8:
         return False, "Пароль повинен містити мінімум 8 символів"
@@ -54,6 +63,67 @@ def validate_password(password):
         return False, "Пароль повинен містити хоча б один спеціальний символ (!@#$%^&* тощо)"
     
     return True, "Пароль відповідає всім вимогам"
+
+def generate_activation_token(email):
+    """Генерує токен для активації акаунту"""
+    return serializer.dumps(email, salt='email-activation-salt')
+
+def verify_activation_token(token, expiration=3600):
+    """
+    Перевіряє токен активації
+    expiration в секундах (за замовчуванням 1 година)
+    """
+    try:
+        email = serializer.loads(token, salt='email-activation-salt', max_age=expiration)
+        return email
+    except:
+        return None
+
+def send_activation_email(user_email, activation_link):
+    """Відправляє email з посиланням для активації"""
+    msg = Message(
+        subject='Активація облікового запису',
+        recipients=[user_email]
+    )
+    
+    msg.html = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h2 style="color: #2c3e50;">Вітаємо!</h2>
+            <p>Дякуємо за реєстрацію в нашій системі управління обліковими записами.</p>
+            <p>Будь ласка, натисніть на кнопку нижче, щоб активувати ваш обліковий запис:</p>
+            <p style="margin: 30px 0;">
+                <a href="{activation_link}" 
+                   style="background-color: #007bff; 
+                          color: white; 
+                          padding: 12px 30px; 
+                          text-decoration: none; 
+                          border-radius: 5px;
+                          display: inline-block;">
+                    Активувати акаунт
+                </a>
+            </p>
+            <p style="color: #7f8c8d; font-size: 0.9em;">
+                Або скопіюйте це посилання в браузер:<br>
+                <a href="{activation_link}">{activation_link}</a>
+            </p>
+            <p style="color: #7f8c8d; font-size: 0.9em; margin-top: 30px;">
+                Посилання дійсне протягом 1 години.
+            </p>
+            <hr style="border: none; border-top: 1px solid #ecf0f1; margin: 30px 0;">
+            <p style="color: #95a5a6; font-size: 0.8em;">
+                Якщо ви не реєструвалися в нашій системі, просто ігноруйте цей лист.
+            </p>
+        </body>
+    </html>
+    """
+    
+    try:
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Помилка відправки email: {e}")
+        return False
 
 @app.route('/')
 def index():
@@ -113,11 +183,43 @@ def register():
         new_user = User(username=username, email=email, password_hash=password_hash)
         db.session.add(new_user)
         db.session.commit()
+
+        token = generate_activation_token(email)
+        activation_link = url_for('activate', token=token, _external=True)
+
+        if send_activation_email(email, activation_link):
+            flash('Реєстрація успішна! Перевірте вашу пошту для активації акаунту', 'success')
+        else:
+            flash('Реєстрація успішна, але виникла помилка з відправкою email. Зверніться до адміністратора', 'warning')
         
-        flash('Реєстрація успішна! Тепер ви можете увійти', 'success')
         return redirect(url_for('login'))
     
     return render_template('register.html', site_key=app.config['RECAPTCHA_SITE_KEY'])
+
+@app.route('/activate/<token>')
+def activate(token):
+    """Активація облікового запису"""
+    email = verify_activation_token(token)
+    
+    if not email:
+        flash('Посилання для активації недійсне або застаріле', 'danger')
+        return redirect(url_for('login'))
+    
+    user = User.query.filter_by(email=email).first()
+    
+    if not user:
+        flash('Користувача не знайдено', 'danger')
+        return redirect(url_for('login'))
+    
+    if user.is_active:
+        flash('Акаунт вже активовано. Ви можете увійти', 'info')
+        return redirect(url_for('login'))
+
+    user.is_active = True
+    db.session.commit()
+    
+    flash('Акаунт успішно активовано! Тепер ви можете увійти', 'success')
+    return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -130,6 +232,10 @@ def login():
         if not user:
             flash('Користувача не знайдено. Будь ласка, зареєструйтесь', 'warning')
             return redirect(url_for('register'))
+        
+        if not user.is_active:
+            flash('Акаунт не активовано. Перевірте вашу пошту для активації', 'warning')
+            return render_template('login.html')
 
         if check_password_hash(user.password_hash, password):
             session['user_id'] = user.id
