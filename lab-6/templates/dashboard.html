@@ -13,6 +13,21 @@
                 <h4>Вітаємо, {{ user.username }}!</h4>
                 <p><strong>Email:</strong> {{ user.email }}</p>
                 <p><strong>Дата реєстрації:</strong> {{ user.created_at.strftime('%d.%m.%Y %H:%M') }}</p>
+                <p><strong>Статус акаунту:</strong> 
+                    {% if user.is_active %}
+                        <span class="badge bg-success">Активний</span>
+                    {% else %}
+                        <span class="badge bg-warning">Неактивний</span>
+                    {% endif %}
+                </p>
+                
+                <hr>
+                
+                <div class="d-grid gap-2">
+                    <a href="{{ url_for('admin_logs') }}" class="btn btn-info">
+                        📊 Переглянути журнал входів
+                    </a>
+                </div>
             </div>
         </div>
     </div>

@@ -3,7 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import URLSafeTimedSerializer
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import re
 import requests
 import os
@@ -30,6 +30,9 @@ app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
 db = SQLAlchemy(app)
 mail = Mail(app)
 
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_DURATION = 15 
+
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 class User(db.Model):
@@ -40,8 +43,67 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime, nullable=True)
+
     def __repr__(self):
         return f'<User {self.username}>'
+
+class LoginLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), nullable=False)
+    ip_address = db.Column(db.String(50), nullable=False)
+    user_agent = db.Column(db.String(255), nullable=True)
+    status = db.Column(db.String(20), nullable=False)  # success, failed, blocked
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    failure_reason = db.Column(db.String(100), nullable=True)
+
+    def __repr__(self):
+        return f'<LoginLog {self.username} - {self.status}>'
+
+
+def log_login_attempt(username, status, failure_reason=None):
+    """Логує спробу входу в систему"""
+    log_entry = LoginLog(
+        username=username,
+        ip_address=request.remote_addr,
+        user_agent=request.headers.get('User-Agent'),
+        status=status,
+        failure_reason=failure_reason
+    )
+    db.session.add(log_entry)
+    db.session.commit()
+
+def is_user_locked(user):
+    """Перевіряє чи заблокований користувач"""
+    if user.locked_until:
+
+        locked_until = user.locked_until
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        
+        now = datetime.now(timezone.utc)
+        
+        if locked_until > now:
+            return True, locked_until
+    
+    return False, None
+
+def reset_failed_attempts(user):
+    """Скидає лічильник невдалих спроб"""
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    db.session.commit()
+
+def increment_failed_attempts(user):
+    """Збільшує лічильник невдалих спроб і блокує при перевищенні"""
+    user.failed_login_attempts += 1
+    
+    if user.failed_login_attempts >= MAX_LOGIN_ATTEMPTS:
+        user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_DURATION)
+        flash(f'Акаунт заблоковано на {LOCKOUT_DURATION} хвилин через перевищення кількості невдалих спроб входу', 'danger')
+    
+    db.session.commit()
 
 def validate_password(password):
     """
@@ -230,20 +292,38 @@ def login():
         user = User.query.filter_by(username=username).first()
         
         if not user:
+            log_login_attempt(username, 'failed', 'user_not_found')
             flash('Користувача не знайдено. Будь ласка, зареєструйтесь', 'warning')
             return redirect(url_for('register'))
-        
+
+        is_locked, locked_until = is_user_locked(user)
+        if is_locked:
+            remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            log_login_attempt(username, 'blocked', 'account_locked')
+            flash(f'Акаунт заблоковано. Спробуйте через {int(remaining_time)} хвилин', 'danger')
+            return render_template('login.html')
+
         if not user.is_active:
+            log_login_attempt(username, 'failed', 'not_activated')
             flash('Акаунт не активовано. Перевірте вашу пошту для активації', 'warning')
             return render_template('login.html')
 
         if check_password_hash(user.password_hash, password):
+            reset_failed_attempts(user)
+            log_login_attempt(username, 'success')
+            
             session['user_id'] = user.id
             session['username'] = user.username
             flash(f'Вітаємо, {user.username}!', 'success')
             return redirect(url_for('dashboard'))
         else:
-            flash('Невірний пароль', 'danger')
+            increment_failed_attempts(user)
+            log_login_attempt(username, 'failed', 'wrong_password')
+            
+            remaining_attempts = MAX_LOGIN_ATTEMPTS - user.failed_login_attempts
+            if remaining_attempts > 0:
+                flash(f'Невірний пароль. Залишилось спроб: {remaining_attempts}', 'danger')
+            
             return render_template('login.html')
     
     return render_template('login.html')
@@ -256,6 +336,17 @@ def dashboard():
     
     user = User.query.get(session['user_id'])
     return render_template('dashboard.html', user=user)
+
+@app.route('/admin/logs')
+def admin_logs():
+    """Сторінка перегляду логів входу (тільки для адміністратора)"""
+    if 'user_id' not in session:
+        flash('Спочатку увійдіть в систему', 'warning')
+        return redirect(url_for('login'))
+
+    logs = LoginLog.query.order_by(LoginLog.timestamp.desc()).limit(100).all()
+    
+    return render_template('admin_logs.html', logs=logs)
 
 @app.route('/logout')
 def logout():
