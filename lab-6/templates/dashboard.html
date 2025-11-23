@@ -23,6 +23,30 @@
                 
                 <hr>
                 
+                <!-- 2FA статус -->
+                <div class="mb-3">
+                    <h5>Двофакторна аутентифікація (2FA)</h5>
+                    <p>
+                        <strong>Статус:</strong> 
+                        {% if user.two_fa_enabled %}
+                            <span class="badge bg-success">Увімкнено</span>
+                        {% else %}
+                            <span class="badge bg-secondary">Вимкнено</span>
+                        {% endif %}
+                    </p>
+                    
+                    {% if user.two_fa_enabled %}
+                        <form method="POST" action="{{ url_for('disable_2fa') }}" onsubmit="return confirm('Ви впевнені, що хочете вимкнути 2FA?');">
+                            <button type="submit" class="btn btn-danger">Вимкнути 2FA</button>
+                        </form>
+                    {% else %}
+                        <a href="{{ url_for('setup_2fa') }}" class="btn btn-success">Увімкнути 2FA</a>
+                        <p class="text-muted mt-2"><small>Рекомендуємо увімкнути для додаткової безпеки</small></p>
+                    {% endif %}
+                </div>
+                
+                <hr>
+                
                 <div class="d-grid gap-2">
                     <a href="{{ url_for('admin_logs') }}" class="btn btn-info">
                         📊 Переглянути журнал входів

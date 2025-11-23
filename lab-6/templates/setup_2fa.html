@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Налаштування 2FA{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h3>Налаштування двофакторної аутентифікації</h3>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info">
+                    <strong>Крок 1:</strong> Встановіть додаток для аутентифікації на ваш телефон:
+                    <ul>
+                        <li>Google Authenticator</li>
+                        <li>Microsoft Authenticator</li>
+                        <li>Authy</li>
+                    </ul>
+                </div>
+                
+                <div class="text-center my-4">
+                    <h5>Крок 2: Відскануйте QR-код</h5>
+                    <img src="{{ qr_code }}" alt="QR Code" class="img-fluid" style="max-width: 300px;">
+                </div>
+                
+                <div class="alert alert-warning">
+                    <strong>Або введіть цей ключ вручну:</strong><br>
+                    <code style="font-size: 1.2em;">{{ secret }}</code>
+                </div>
+                
+                <hr>
+                
+                <form method="POST" action="{{ url_for('enable_2fa') }}">
+                    <div class="mb-3">
+                        <label for="verification_code" class="form-label">
+                            <strong>Крок 3:</strong> Введіть 6-значний код з додатку для підтвердження
+                        </label>
+                        <input type="text" 
+                               class="form-control" 
+                               id="verification_code" 
+                               name="verification_code" 
+                               placeholder="123456"
+                               pattern="[0-9]{6}"
+                               maxlength="6"
+                               required
+                               autofocus>
+                        <div class="form-text">Введіть код, який показує ваш додаток для аутентифікації</div>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-success btn-lg">Підтвердити та увімкнути 2FA</button>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Скасувати</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

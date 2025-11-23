@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Двофакторна аутентифікація{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h3>Двофакторна аутентифікація</h3>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info">
+                    <strong>Крок 2:</strong> Введіть код з вашого додатку для аутентифікації
+                </div>
+                
+                <form method="POST" action="{{ url_for('login') }}">
+                    <!-- Приховані поля для збереження username та password -->
+                    <input type="hidden" name="username" value="{{ username }}">
+                    <input type="hidden" name="password" value="{{ password }}">
+                    
+                    <div class="mb-3">
+                        <label for="two_fa_code" class="form-label">6-значний код</label>
+                        <input type="text" 
+                               class="form-control form-control-lg text-center" 
+                               id="two_fa_code" 
+                               name="two_fa_code" 
+                               placeholder="123456"
+                               pattern="[0-9]{6}"
+                               maxlength="6"
+                               required
+                               autofocus
+                               style="font-size: 2em; letter-spacing: 0.5em;">
+                        <div class="form-text">Відкрийте додаток для аутентифікації та введіть поточний код</div>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-primary btn-lg">Підтвердити</button>
+                        <a href="{{ url_for('login') }}" class="btn btn-secondary">Скасувати</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

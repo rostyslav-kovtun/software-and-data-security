@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session
+from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -8,6 +8,10 @@ import re
 import requests
 import os
 from dotenv import load_dotenv
+import pyotp
+import qrcode
+from io import BytesIO
+import base64
 
 load_dotenv()
 
@@ -34,7 +38,6 @@ MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION = 15 
 
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
-
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -42,9 +45,14 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     is_active = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-
+    
+    # для обмеження спроб входу
     failed_login_attempts = db.Column(db.Integer, default=0)
     locked_until = db.Column(db.DateTime, nullable=True)
+    
+    # це 2FA
+    two_fa_secret = db.Column(db.String(32), nullable=True)
+    two_fa_enabled = db.Column(db.Boolean, default=False, nullable=False)
 
     def __repr__(self):
         return f'<User {self.username}>'
@@ -73,6 +81,37 @@ def log_login_attempt(username, status, failure_reason=None):
     )
     db.session.add(log_entry)
     db.session.commit()
+
+# для 2FA
+def generate_2fa_secret():
+    """Генерує секретний ключ для 2FA"""
+    return pyotp.random_base32()
+
+def get_2fa_uri(username, secret):
+    """Генерує URI для QR-коду"""
+    return pyotp.totp.TOTP(secret).provisioning_uri(
+        name=username,
+        issuer_name='User Management System'
+    )
+
+def verify_2fa_code(secret, code):
+    """Перевіряє код 2FA"""
+    totp = pyotp.TOTP(secret)
+    return totp.verify(code, valid_window=1)
+
+def generate_qr_code(data):
+    """Генерує QR-код як base64 зображення"""
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(data)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    return f"data:image/png;base64,{img_str}"
 
 def is_user_locked(user):
     """Перевіряє чи заблокований користувач"""
@@ -288,35 +327,37 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-
+        two_fa_code = request.form.get('two_fa_code')
+        
+        # тут ідентифікується користувач
         user = User.query.filter_by(username=username).first()
         
         if not user:
             log_login_attempt(username, 'failed', 'user_not_found')
             flash('Користувача не знайдено. Будь ласка, зареєструйтесь', 'warning')
             return redirect(url_for('register'))
-
+        
+        # перевірка чи заблокований акаунт
         is_locked, locked_until = is_user_locked(user)
         if is_locked:
-            remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            now = datetime.now(timezone.utc)
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            
+            remaining_time = (locked_until - now).total_seconds() / 60
             log_login_attempt(username, 'blocked', 'account_locked')
             flash(f'Акаунт заблоковано. Спробуйте через {int(remaining_time)} хвилин', 'danger')
             return render_template('login.html')
-
+        
+        # перевірка чи активований акаунт
         if not user.is_active:
             log_login_attempt(username, 'failed', 'not_activated')
             flash('Акаунт не активовано. Перевірте вашу пошту для активації', 'warning')
             return render_template('login.html')
+        
+        # перевірка хеша пароля
+        if not check_password_hash(user.password_hash, password):
 
-        if check_password_hash(user.password_hash, password):
-            reset_failed_attempts(user)
-            log_login_attempt(username, 'success')
-            
-            session['user_id'] = user.id
-            session['username'] = user.username
-            flash(f'Вітаємо, {user.username}!', 'success')
-            return redirect(url_for('dashboard'))
-        else:
             increment_failed_attempts(user)
             log_login_attempt(username, 'failed', 'wrong_password')
             
@@ -325,6 +366,24 @@ def login():
                 flash(f'Невірний пароль. Залишилось спроб: {remaining_attempts}', 'danger')
             
             return render_template('login.html')
+
+        if user.two_fa_enabled:
+            if not two_fa_code:
+
+                return render_template('login_2fa.html', username=username, password=password)
+
+            if not verify_2fa_code(user.two_fa_secret, two_fa_code):
+                log_login_attempt(username, 'failed', '2fa_code_invalid')
+                flash('Невірний код двофакторної аутентифікації', 'danger')
+                return render_template('login_2fa.html', username=username, password=password)
+
+        reset_failed_attempts(user)
+        log_login_attempt(username, 'success')
+        
+        session['user_id'] = user.id
+        session['username'] = user.username
+        flash(f'Вітаємо, {user.username}!', 'success')
+        return redirect(url_for('dashboard'))
     
     return render_template('login.html')
 
@@ -336,6 +395,87 @@ def dashboard():
     
     user = User.query.get(session['user_id'])
     return render_template('dashboard.html', user=user)
+
+@app.route('/2fa/setup')
+def setup_2fa():
+    """Сторінка налаштування 2FA"""
+    if 'user_id' not in session:
+        flash('Спочатку увійдіть в систему', 'warning')
+        return redirect(url_for('login'))
+    
+    user = User.query.get(session['user_id'])
+    if not user:
+        session.clear()
+        flash('Сесія застаріла. Будь ласка, увійдіть знову', 'warning')
+        return redirect(url_for('login'))
+    
+    # Якщо 2FA вже увімкнено
+    if user.two_fa_enabled:
+        flash('Двофакторна аутентифікація вже увімкнена', 'info')
+        return redirect(url_for('dashboard'))
+    
+    # Генерувати новий секрет
+    secret = generate_2fa_secret()
+    session['temp_2fa_secret'] = secret
+    
+    # Генерувати QR-код
+    uri = get_2fa_uri(user.username, secret)
+    qr_code = generate_qr_code(uri)
+    
+    return render_template('setup_2fa.html', qr_code=qr_code, secret=secret)
+
+@app.route('/2fa/enable', methods=['POST'])
+def enable_2fa():
+    """Увімкнути 2FA після підтвердження"""
+    if 'user_id' not in session:
+        flash('Спочатку увійдіть в систему', 'warning')
+        return redirect(url_for('login'))
+    
+    user = User.query.get(session['user_id'])
+    if not user:
+        session.clear()
+        flash('Сесія застаріла. Будь ласка, увійдіть знову', 'warning')
+        return redirect(url_for('login'))
+    
+    verification_code = request.form.get('verification_code')
+    temp_secret = session.get('temp_2fa_secret')
+    
+    if not temp_secret:
+        flash('Секретний ключ не знайдено. Спробуйте ще раз', 'danger')
+        return redirect(url_for('setup_2fa'))
+    
+    # перевірити код
+    if verify_2fa_code(temp_secret, verification_code):
+        user.two_fa_secret = temp_secret
+        user.two_fa_enabled = True
+        db.session.commit()
+        
+        session.pop('temp_2fa_secret', None)
+        flash('Двофакторна аутентифікація успішно увімкнена!', 'success')
+        return redirect(url_for('dashboard'))
+    else:
+        flash('Невірний код підтвердження. Спробуйте ще раз', 'danger')
+        return redirect(url_for('setup_2fa'))
+
+@app.route('/2fa/disable', methods=['POST'])
+def disable_2fa():
+    """Вимкнути 2FA"""
+    if 'user_id' not in session:
+        flash('Спочатку увійдіть в систему', 'warning')
+        return redirect(url_for('login'))
+    
+    user = User.query.get(session['user_id'])
+    if not user:
+        session.clear()
+        flash('Сесія застаріла. Будь ласка, увійдіть знову', 'warning')
+        return redirect(url_for('login'))
+    
+    user.two_fa_enabled = False
+    user.two_fa_secret = None
+    db.session.commit()
+    
+    flash('Двофакторна аутентифікація вимкнена', 'info')
+    return redirect(url_for('dashboard'))
 
 @app.route('/admin/logs')
 def admin_logs():
