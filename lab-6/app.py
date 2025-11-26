@@ -31,6 +31,12 @@ app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
 
+app.config['GITHUB_CLIENT_ID'] = os.getenv('GITHUB_CLIENT_ID')
+app.config['GITHUB_CLIENT_SECRET'] = os.getenv('GITHUB_CLIENT_SECRET')
+app.config['GITHUB_AUTHORIZE_URL'] = 'https://github.com/login/oauth/authorize'
+app.config['GITHUB_TOKEN_URL'] = 'https://github.com/login/oauth/access_token'
+app.config['GITHUB_API_BASE_URL'] = 'https://api.github.com/'
+
 db = SQLAlchemy(app)
 mail = Mail(app)
 
@@ -38,11 +44,12 @@ MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION = 15 
 
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
+    password_hash = db.Column(db.String(255), nullable=True)
     is_active = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     
@@ -50,9 +57,13 @@ class User(db.Model):
     failed_login_attempts = db.Column(db.Integer, default=0)
     locked_until = db.Column(db.DateTime, nullable=True)
     
-    # це 2FA
+    # це для 2FA
     two_fa_secret = db.Column(db.String(32), nullable=True)
     two_fa_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    
+    #  для OAuth
+    github_id = db.Column(db.String(100), unique=True, nullable=True)
+    oauth_provider = db.Column(db.String(20), nullable=True)
 
     def __repr__(self):
         return f'<User {self.username}>'
@@ -476,6 +487,118 @@ def disable_2fa():
     
     flash('Двофакторна аутентифікація вимкнена', 'info')
     return redirect(url_for('dashboard'))
+
+
+@app.route('/auth/github')
+def github_login():
+    """Перенаправлення на GitHub для авторизації"""
+    github_client_id = app.config['GITHUB_CLIENT_ID']
+    redirect_uri = url_for('github_callback', _external=True)
+
+    state = serializer.dumps({'redirect': 'github_auth'})
+    session['oauth_state'] = state
+    
+    github_auth_url = (
+        f"{app.config['GITHUB_AUTHORIZE_URL']}"
+        f"?client_id={github_client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=user:email"
+        f"&state={state}"
+    )
+    
+    return redirect(github_auth_url)
+
+@app.route('/auth/github/callback')
+def github_callback():
+    """Callback після авторизації GitHub"""
+
+    state = request.args.get('state')
+    if state != session.get('oauth_state'):
+        flash('Помилка авторизації: невірний state', 'danger')
+        return redirect(url_for('login'))
+
+    code = request.args.get('code')
+    if not code:
+        flash('Помилка авторизації GitHub', 'danger')
+        return redirect(url_for('login'))
+
+    token_data = {
+        'client_id': app.config['GITHUB_CLIENT_ID'],
+        'client_secret': app.config['GITHUB_CLIENT_SECRET'],
+        'code': code
+    }
+    
+    token_response = requests.post(
+        app.config['GITHUB_TOKEN_URL'],
+        data=token_data,
+        headers={'Accept': 'application/json'}
+    )
+    
+    token_json = token_response.json()
+    access_token = token_json.get('access_token')
+    
+    if not access_token:
+        flash('Не вдалося отримати токен доступу від GitHub', 'danger')
+        return redirect(url_for('login'))
+
+    headers = {
+        'Authorization': f'token {access_token}',
+        'Accept': 'application/json'
+    }
+    
+    user_response = requests.get(
+        f"{app.config['GITHUB_API_BASE_URL']}user",
+        headers=headers
+    )
+    
+    user_data = user_response.json()
+
+    email_response = requests.get(
+        f"{app.config['GITHUB_API_BASE_URL']}user/emails",
+        headers=headers
+    )
+    
+    emails = email_response.json()
+    primary_email = next((email['email'] for email in emails if email['primary']), None)
+    
+    if not primary_email:
+        primary_email = user_data.get('email')
+    
+    github_id = str(user_data.get('id'))
+    username = user_data.get('login')
+
+    user = User.query.filter_by(github_id=github_id).first()
+    
+    if not user:
+    
+        existing_user = User.query.filter_by(email=primary_email).first()
+        if existing_user:
+            flash('Користувач з такою email адресою вже існує', 'warning')
+            return redirect(url_for('login'))
+
+        user = User(
+            username=username,
+            email=primary_email,
+            github_id=github_id,
+            oauth_provider='github',
+            is_active=True,
+            password_hash=None 
+        )
+        db.session.add(user)
+        db.session.commit()
+        
+        flash(f'Акаунт створено через GitHub! Вітаємо, {username}!', 'success')
+    else:
+        flash(f'Вітаємо, {user.username}!', 'success')
+
+    session['user_id'] = user.id
+    session['username'] = user.username
+    session.pop('oauth_state', None)
+    
+    log_login_attempt(user.username, 'success', 'oauth_github')
+    
+    return redirect(url_for('dashboard'))
+
 
 @app.route('/admin/logs')
 def admin_logs():
