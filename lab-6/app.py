@@ -181,10 +181,6 @@ def generate_activation_token(email):
     return serializer.dumps(email, salt='email-activation-salt')
 
 def verify_activation_token(token, expiration=3600):
-    """
-    Перевіряє токен активації
-    expiration в секундах (за замовчуванням 1 година)
-    """
     try:
         email = serializer.loads(token, salt='email-activation-salt', max_age=expiration)
         return email
@@ -225,6 +221,83 @@ def send_activation_email(user_email, activation_link):
             <hr style="border: none; border-top: 1px solid #ecf0f1; margin: 30px 0;">
             <p style="color: #95a5a6; font-size: 0.8em;">
                 Якщо ви не реєструвалися в нашій системі, просто ігноруйте цей лист.
+            </p>
+        </body>
+    </html>
+    """
+    
+    try:
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Помилка відправки email: {e}")
+        return False
+
+
+def generate_reset_token(email):
+    """Генерує токен для скидання пароля"""
+    return serializer.dumps(email, salt='password-reset-salt')
+
+def verify_reset_token(token, expiration=3600):
+    """
+    Перевіряє токен скидання пароля
+    expiration в секундах (за замовчуванням 1 година)
+    """
+    try:
+        email = serializer.loads(token, salt='password-reset-salt', max_age=expiration)
+        return email
+    except:
+        return None
+
+
+def send_reset_password_email(user_email, reset_link):
+    """Відправляє email з посиланням для скидання пароля"""
+
+    test_domains = ['toaik.com', 'tempmail.com', '10minutemail', 'guerrillamail', 'mailinator']
+    is_test_email = any(domain in user_email for domain in test_domains)
+    
+    if is_test_email:
+
+        print("\n" + "="*80)
+        print("📧 PASSWORD RESET EMAIL (TEST MODE)")
+        print(f"To: {user_email}")
+        print(f"Reset Link: {reset_link}")
+        print("="*80 + "\n")
+        return True
+    
+    msg = Message(
+        subject='Відновлення пароля',
+        recipients=[user_email]
+    )
+    
+    msg.html = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h2 style="color: #2c3e50;">Відновлення пароля</h2>
+            <p>Ви отримали цей лист, оскільки запросили відновлення пароля для вашого облікового запису.</p>
+            <p>Будь ласка, натисніть на кнопку нижче, щоб скинути ваш пароль:</p>
+            <p style="margin: 30px 0;">
+                <a href="{reset_link}" 
+                   style="background-color: #dc3545; 
+                          color: white; 
+                          padding: 12px 30px; 
+                          text-decoration: none; 
+                          border-radius: 5px;
+                          display: inline-block;">
+                    Скинути пароль
+                </a>
+            </p>
+            <p style="color: #7f8c8d; font-size: 0.9em;">
+                Або скопіюйте це посилання в браузер:<br>
+                <a href="{reset_link}">{reset_link}</a>
+            </p>
+            <p style="color: #7f8c8d; font-size: 0.9em; margin-top: 30px;">
+                Посилання дійсне протягом 1 години.
+            </p>
+            <hr style="border: none; border-top: 1px solid #ecf0f1; margin: 30px 0;">
+            <p style="color: #95a5a6; font-size: 0.8em;">
+                Якщо ви не запитували відновлення пароля, просто ігноруйте цей лист. 
+                Ваш пароль залишиться без змін.
             </p>
         </body>
     </html>
@@ -332,6 +405,79 @@ def activate(token):
     
     flash('Акаунт успішно активовано! Тепер ви можете увійти', 'success')
     return redirect(url_for('login'))
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    """Запит на відновлення пароля"""
+    if request.method == 'POST':
+        email = request.form.get('email')
+        
+        if not email:
+            flash('Будь ласка, введіть email адресу', 'danger')
+            return render_template('forgot_password.html')
+
+        user = User.query.filter_by(email=email).first()
+        
+        # навіть якщо користувача не існує, то всерівно буде показувати успішне повідомлення (для безпеки)
+        flash('Якщо акаунт з такою email адресою існує, ви отримаєте лист з інструкціями', 'info')
+        
+        if user:
+
+            token = generate_reset_token(email)
+            reset_link = url_for('reset_password', token=token, _external=True)
+
+            send_reset_password_email(email, reset_link)
+        
+        return redirect(url_for('login'))
+    
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    """Скидання пароля за токеном"""
+
+    email = verify_reset_token(token)
+    
+    if not email:
+        flash('Посилання для скидання пароля недійсне або застаріле', 'danger')
+        return redirect(url_for('forgot_password'))
+
+    user = User.query.filter_by(email=email).first()
+    
+    if not user:
+        flash('Користувача не знайдено', 'danger')
+        return redirect(url_for('login'))
+    
+    if request.method == 'POST':
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+
+        if not password or not confirm_password:
+            flash('Будь ласка, заповніть всі поля', 'danger')
+            return render_template('reset_password.html', token=token)
+
+        if password != confirm_password:
+            flash('Паролі не співпадають', 'danger')
+            return render_template('reset_password.html', token=token)
+
+        is_valid, message = validate_password(password)
+        if not is_valid:
+            flash(message, 'danger')
+            return render_template('reset_password.html', token=token)
+        
+        user.password_hash = generate_password_hash(password, method='pbkdf2:sha256')
+        
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        
+        db.session.commit()
+        
+        flash('Пароль успішно змінено! Тепер ви можете увійти з новим паролем', 'success')
+        return redirect(url_for('login'))
+    
+    return render_template('reset_password.html', token=token)
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
