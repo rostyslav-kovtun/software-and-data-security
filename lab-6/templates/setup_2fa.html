@@ -32,6 +32,7 @@
                 <hr>
                 
                 <form method="POST" action="{{ url_for('enable_2fa') }}">
+                    {{ csrf_token() }}
                     <div class="mb-3">
                         <label for="verification_code" class="form-label">
                             <strong>Крок 3:</strong> Введіть 6-значний код з додатку для підтвердження

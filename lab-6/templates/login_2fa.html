@@ -15,6 +15,7 @@
                 </div>
                 
                 <form method="POST" action="{{ url_for('login') }}">
+                    {{ csrf_token() }}
                     <!-- Приховані поля для збереження username та password -->
                     <input type="hidden" name="username" value="{{ username }}">
                     <input type="hidden" name="password" value="{{ password }}">

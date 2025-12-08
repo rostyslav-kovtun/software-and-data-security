@@ -12,10 +12,12 @@ import pyotp
 import qrcode
 from io import BytesIO
 import base64
+from flask_wtf.csrf import CSRFProtect, CSRFError
 
 load_dotenv()
 
 app = Flask(__name__)
+csrf = CSRFProtect(app)
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-please-change')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
@@ -654,6 +656,7 @@ def github_login():
     
     return redirect(github_auth_url)
 
+
 @app.route('/auth/github/callback')
 def github_callback():
     """Callback після авторизації GitHub"""
@@ -766,4 +769,6 @@ def logout():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-    app.run(debug=True)
+
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    app.run(debug=debug_mode)

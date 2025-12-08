@@ -37,6 +37,7 @@
                     
                     {% if user.two_fa_enabled %}
                         <form method="POST" action="{{ url_for('disable_2fa') }}" onsubmit="return confirm('Ви впевнені, що хочете вимкнути 2FA?');">
+                            {{ csrf_token() }}
                             <button type="submit" class="btn btn-danger">Вимкнути 2FA</button>
                         </form>
                     {% else %}
